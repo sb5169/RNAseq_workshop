@@ -1,0 +1,248 @@
+---
+title: "Differential Expression Analysis"
+author: "Sana Badri"
+date: "7/22/2021"
+---
+
+
+>-  Process of analyzing the differences in RNA expression between multiple samples and groups from Counts data.
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Load DESeq2 dataset:
+>- From transcript abundance files and tximport
+>- From a count matrix
+>- From htseq-count files
+>- From a SummarizedExperiment object
+
+
+```{r, echo = TRUE}
+### LOAD REQUIRED LIBRARIES
+library("DESeq2")
+library("pheatmap")
+library("RColorBrewer")
+library("vsn")
+library("AnnotationDbi")
+#options(connectionObserver = NULL)
+library("org.Hs.eg.db")
+library("genefilter")
+library("biomaRt")
+library("IHW")
+library("ggplot2")
+
+
+setwd("/Users/sanabadri/Desktop/RNAseqWorkshop/")
+CountTable <- read.table("counts.txt", header=TRUE, row.names=1) 
+samples <- read.table("sample.txt", header=TRUE)
+
+#dds <- DESeqDataSetFromMatrix(countData = CountTable, colData=samples, design=~batch+condition)
+dds <- DESeqDataSetFromMatrix(countData = CountTable, colData=samples, design=~condition)
+
+dds = DESeq(dds)
+counts(dds)->raw_counts
+raw_counts<-as.data.frame(counts(dds))
+
+
+#Not necessary to pre-filter low count genes before running the DESeq2 functions, pre-filtering is useful and can be done by removing rows in which there are very few reads, so we reduce the memory size of the dds data object, and increase the speed of the transformation and testing functions within DESeq2
+
+#keep <- rowSums(counts(dds)) >= 10
+#dds <- dds[keep,]
+
+
+#Create a normalized matrix
+norm_counts = counts(dds, normalized = TRUE)
+
+### PRELIMINARY ANALYSES ###
+# The first steps in your analysis should focus on better understanding the relationship of the datasets being studied. This can
+# be simply achieved by generating a PCA plot showing the relationship of your samples.
+# First we transform our raw count data using a variance stabilizing transformation (VST) that roughly mirrors how DeSeq2 models the data.
+vsd1 <- varianceStabilizingTransformation(dds, blind=FALSE)
+
+# Then we plot a PCA, grouping and coloring our datasets according to batch
+plotPCA(vsd1, "condition")
+
+
+
+# we can also attempt to replicate the batch effect correction performed by DeSeq2 using the limma::removeBatchEffect function
+vsd2 <- varianceStabilizingTransformation(dds, blind=FALSE)
+assay(vsd2) <- limma::removeBatchEffect(assay(vsd2), vsd2$batch)
+plotPCA(vsd2, "condition")
+data <- plotPCA(vsd2, "condition",returnData=TRUE)
+
+
+
+
+data <- plotPCA(vsd2, returnData=TRUE)
+percentVar <- round(100 * attr(data, "percentVar"))
+ggplot(data, aes(PC1, PC2, color=condition)) +
+  theme_bw() + 
+  theme(panel.background = element_blank())+
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1))+
+  geom_point(size=5)+
+  scale_color_manual(values=c("#74c476","#ec7014","purple"))+
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  theme(plot.title = element_blank())+
+  theme(text = element_text(size=20))+
+  theme(legend.position="bottom") +
+  theme(axis.text = element_text( color = "black", size = 25))+
+  theme(legend.title=element_blank())
+
+```
+
+# At this stage, you should have a good sense of how your samples cluster and the effect of batch correction (if used)
+# In simple RNA-Seq situations (control vs treatment, 3-5 bioreps each), this is all that should be required. 
+# For more complex situations, you will need to dive deep into working of DeSeq2
+# https://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+
+
+```{r BASIC DGE ANALYSIS USING DESEQ2}
+
+# Run DESEQ and generate a simple plot showing the distribution of regulated and unregulated genes
+DatasetProcessed <- DESeq(dds) # runs DESEQ
+par(mfrow=c(1,1))
+plotMA(DatasetProcessed, main="DESeq2", ylim=c(-5,5))
+
+# Next we perform a contrast analysis to produce a list of differentially regulated genes between our two conditions
+# First we set CTRL dataset as baseline
+DatasetProcessed$condition <- relevel(DatasetProcessed$condition, "Ctrl")
+
+# Next we create our results object while performing shrinkage of effect size 
+# (this reduces the impact of apparent gross changes in low expressed genes)
+res1 <- lfcShrink(DatasetProcessed, coef=2)
+
+
+
+# Here we modify our output data to include two additional columns that contain the baseMeans (a proxy for counts)
+# This is useful for downstream filtering of lowly expressed genes
+baseMeanCtrl = rowMeans(counts(DatasetProcessed,normalized=TRUE)[,DatasetProcessed$condition == "Ctrl"])
+baseMeanCnot = rowMeans(counts(DatasetProcessed,normalized=TRUE)[,DatasetProcessed$condition == "Cnot"])
+res1 = cbind(as.data.frame(res1), baseMeanCtrl, baseMeanCnot)
+
+# Here we add two further columns, the gene symbol (common name) and entrez ID - both of which may be useful downstream
+res1$symbol <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="SYMBOL", keytype="ENSEMBL", multiVals="first") # MAPS GENE IDs
+res1$entrez <- mapIds(org.Hs.eg.db, keys=row.names(res1), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+
+# Finally we write the complete results object to an outfile
+write.csv(res1, "DGEanalysis.csv", row.names=TRUE)
+```
+
+
+
+## Differential analysis
+```{r DE analysis with DESEQ2}
+
+
+Ctrl_Cnot<-res1
+head(`Ctrl_Cnot`)
+dim(`Ctrl_Cnot`)
+
+adj_p_val = 0.1
+abs_log2fc = 1
+
+Ctrl_Cnot_sig = res1[res1$padj < adj_p_val & !is.na(res1$padj) & abs(res1$log2FoldChange) >abs_log2fc,]
+head(`Ctrl_Cnot_sig`)
+dim(`Ctrl_Cnot_sig`)
+
+
+#here we create a new dataframe to modify and add columns for the purpose of generating a volcano plot
+rna_df<-as.data.frame(`Ctrl_Cnot`)
+#create a column with the -log10(adjusted pvalue)
+rna_df$log10.pvalue<-(-1*log10(rna_df$padj))
+#create a column that labels each gene as signicant or not by first intializing everything to be not signifcantly changing
+rna_df$Significant.Gene<-"No"
+
+#identify those rows that are changing
+row_number<-which(rna_df$padj<adj_p_val & abs(rna_df$log2FoldChange)>abs_log2fc)
+#label those rows "yes":
+rna_df$Significant.Gene[row_number]<-"Yes"
+#create another column that can distinguish between up-regulated and down-regulated genes.
+rna_df$Differential_Gene<-rna_df$Significant.Gene
+rna_df$Differential_Gene[which(rna_df$padj< adj_p_val & rna_df$log2FoldChange> abs_log2fc)]<-"Up-Regulated"
+rna_df$Differential_Gene[which(rna_df$padj< adj_p_val & rna_df$log2FoldChange< -abs_log2fc)]<-"Down-Regulated"
+
+```
+
+```{r Volcano plot with ggplot2}
+library(ggplot2)
+library(ggrepel)
+#RNA volcano
+
+#make sure to adjust xlim and ylim based off of the data. Run hist(rna_df$log2FoldChange) and hist(rna_df$log10.pvalue) to get an idea
+
+# pick a set of genes to label:
+rna_df$label<-"No"
+rna_df$label[which(rna_df$padj<adj_p_val & abs(rna_df$log2FoldChange)>abs_log2fc)]<-"Yes"
+
+# Here we add two further columns, the gene symbol (common name) and entrez ID - both of which may be useful downstream
+rna_df$symbol <- mapIds(org.Hs.eg.db, keys=row.names(rna_df), column="SYMBOL", keytype="ENSEMBL", multiVals="first") # MAPS GENE IDs
+rna_df$entrez <- mapIds(org.Hs.eg.db, keys=row.names(rna_df), column="ENTREZID", keytype="ENSEMBL", multiVals="first")
+
+#pdf("Volcano.pdf", width=8, height=4,useDingbats=FALSE)
+pRNA <- ggplot(rna_df, aes(log2FoldChange, log10.pvalue))+
+  geom_point(aes(colour = Differential_Gene),size=1)+
+  scale_colour_manual(values=c("blue", "black","red"))+
+  xlim(-6,6)+
+  ylim(0,5)+
+  xlab(expression(paste(log[2], 'FC(Ctrl/Cnot)')))+
+  ylab(expression(paste(-log[10], '(Q-value)'))) +
+  theme_bw() + 
+  theme(panel.background = element_blank())+
+  theme(panel.border = element_rect(colour = "black", fill=NA, size=1))+
+
+  theme(text = element_text(size=10)) +
+  theme(plot.title = element_blank())+
+  theme(axis.text = element_text( color = "black", size = 10))+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), axis.line=element_line()) +
+  theme(legend.position="none")+
+  geom_vline(xintercept=-abs_log2fc,linetype="dotted")+
+  geom_vline(xintercept=abs_log2fc,linetype="dotted")+
+  geom_text_repel(
+    data = subset(rna_df, label=="Yes"),
+    aes(label = rna_df$symbol[which(label=="Yes")]),
+    size = 5,
+    box.padding = unit(0.35, "lines"),
+    point.padding = unit(0.5, "lines")
+  )
+pRNA
+
+#dev.off()
+
+```
+
+
+## Heatmap with DEGs
+```{r Heatmap}
+sig.genes<-rownames(`Ctrl_Cnot_sig`)
+
+#extract raw counts for these genes:
+m<-match(sig.genes,rownames(norm_counts))
+de_norm_counts<-norm_counts[m,]
+
+
+library(pheatmap)
+library(RColorBrewer)
+
+sample<-as.data.frame(data$name)
+colnames(sample)<-c("samples")
+rownames(sample)<-colnames(de_norm_counts)
+sample$samples<-as.character(data$condition)
+sample2<-sample
+sample2$samples[which(sample2$samples=="Cnot")]<-"#74c476"
+sample2$samples[which(sample2$samples=="Ctrl")]<-"#ec7014"
+sample3 = list(samples = c("Cnot"= "#74c476", "Ctrl"="#ec7014"))
+
+#pdf("HEATMAP.pdf", width=10, height=5,useDingbats=FALSE)
+pheatmap(de_norm_counts,scale = "row",show_rownames=FALSE,
+         colorRampPalette(rev(brewer.pal(n = 10, name ="RdBu")))(25),
+         clustering_method = "ward.D2",clustering_distance_cols ="euclidean",
+         annotation_col  = sample, annotation_colors = sample3[1])
+#dev.off()
+
+```
+

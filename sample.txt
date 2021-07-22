@@ -1,0 +1,7 @@
+batch	condition
+Cnot11	A	Cnot
+Cnot12	B	Cnot
+Cnot13	C	Cnot
+Ctrl1	A	Ctrl
+Ctrl2	B	Ctrl	
+Ctrl3	C	Ctrl
